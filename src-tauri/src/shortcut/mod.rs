@@ -200,6 +200,26 @@ pub fn change_binding(
         }
     };
 
+    // Disabled feature shortcuts stay stored but are not registered, matching
+    // init and resume. Editing one must not turn the hotkey back on.
+    if !settings.registers_binding(&id) {
+        if let Err(e) =
+            validate_shortcut_for_implementation(&binding, settings.keyboard_implementation)
+        {
+            return Err(e);
+        }
+        let mut updated_binding = binding_to_modify;
+        updated_binding.current_binding = binding;
+        settings.bindings.insert(id, updated_binding.clone());
+        settings::write_settings(&app, settings);
+        crate::secure_input::reconcile_fallback(&app);
+        return Ok(BindingResponse {
+            success: true,
+            binding: Some(updated_binding),
+            error: None,
+        });
+    }
+
     // If this is the cancel binding, just update the settings and return
     // It's managed dynamically, so we don't register/unregister here
     if id == "cancel" {
@@ -306,7 +326,7 @@ pub fn resume_all_shortcuts(app: &AppHandle) {
         if id == "cancel" {
             continue;
         }
-        if id == "transcribe_with_post_process" && !settings.post_process_enabled {
+        if !settings.registers_binding(id) {
             continue;
         }
         if let Err(e) = register_shortcut(app, binding.clone()) {
@@ -497,8 +517,8 @@ fn register_all_shortcuts_for_implementation(
             continue;
         }
 
-        // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !current_settings.post_process_enabled {
+        // Skip feature shortcuts that the user has turned off.
+        if !current_settings.registers_binding(id) {
             continue;
         }
 
@@ -1109,6 +1129,29 @@ pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Res
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_context_scribe_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.context_scribe_enabled = enabled;
+    settings::write_settings(&app, settings.clone());
+
+    if let Some(binding) = settings
+        .bindings
+        .get("transcribe_with_context_scribe")
+        .cloned()
+    {
+        if enabled {
+            let _ = register_shortcut(&app, binding);
+        } else {
+            let _ = unregister_shortcut(&app, binding);
+        }
+    }
+
+    crate::secure_input::reconcile_fallback(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_experimental_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.experimental_enabled = enabled;
@@ -1222,6 +1265,93 @@ pub fn set_post_process_provider(app: AppHandle, provider_id: String) -> Result<
     Ok(())
 }
 
+enum PromptLibrary {
+    PostProcess,
+    ContextScribe,
+}
+
+fn prompt_library_fields(
+    settings: &mut settings::AppSettings,
+    library: PromptLibrary,
+) -> (&mut Vec<LLMPrompt>, &mut Option<String>) {
+    match library {
+        PromptLibrary::PostProcess => (
+            &mut settings.post_process_prompts,
+            &mut settings.post_process_selected_prompt_id,
+        ),
+        PromptLibrary::ContextScribe => (
+            &mut settings.context_scribe_prompts,
+            &mut settings.context_scribe_selected_prompt_id,
+        ),
+    }
+}
+
+fn add_prompt_to_library(
+    settings: &mut settings::AppSettings,
+    library: PromptLibrary,
+    name: String,
+    prompt: String,
+) -> LLMPrompt {
+    let new_prompt = LLMPrompt {
+        id: format!("prompt_{}", chrono::Utc::now().timestamp_millis()),
+        name,
+        prompt,
+    };
+    let (prompts, _) = prompt_library_fields(settings, library);
+    prompts.push(new_prompt.clone());
+    new_prompt
+}
+
+fn update_prompt_in_library(
+    settings: &mut settings::AppSettings,
+    library: PromptLibrary,
+    id: String,
+    name: String,
+    prompt: String,
+) -> Result<(), String> {
+    let (prompts, _) = prompt_library_fields(settings, library);
+    if let Some(existing_prompt) = prompts.iter_mut().find(|p| p.id == id) {
+        existing_prompt.name = name;
+        existing_prompt.prompt = prompt;
+        Ok(())
+    } else {
+        Err(format!("Prompt with id '{}' not found", id))
+    }
+}
+
+fn delete_prompt_from_library(
+    settings: &mut settings::AppSettings,
+    library: PromptLibrary,
+    id: &str,
+) -> Result<(), String> {
+    let (prompts, selected_id) = prompt_library_fields(settings, library);
+    if prompts.len() <= 1 {
+        return Err("Cannot delete the last prompt".to_string());
+    }
+    let original_len = prompts.len();
+    prompts.retain(|p| p.id != id);
+    if prompts.len() == original_len {
+        return Err(format!("Prompt with id '{id}' not found"));
+    }
+    if selected_id.as_deref() == Some(id) {
+        *selected_id = prompts.first().map(|p| p.id.clone());
+    }
+    Ok(())
+}
+
+fn select_prompt_in_library(
+    settings: &mut settings::AppSettings,
+    library: PromptLibrary,
+    id: String,
+) -> Result<(), String> {
+    let (prompts, selected_id) = prompt_library_fields(settings, library);
+    if !prompts.iter().any(|p| p.id == id) {
+        return Err(format!("Prompt with id '{id}' not found"));
+    }
+    *selected_id = Some(id);
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn add_post_process_prompt(
@@ -1230,19 +1360,8 @@ pub fn add_post_process_prompt(
     prompt: String,
 ) -> Result<LLMPrompt, String> {
     let mut settings = settings::get_settings(&app);
-
-    // Generate unique ID using timestamp and random component
-    let id = format!("prompt_{}", chrono::Utc::now().timestamp_millis());
-
-    let new_prompt = LLMPrompt {
-        id: id.clone(),
-        name,
-        prompt,
-    };
-
-    settings.post_process_prompts.push(new_prompt.clone());
+    let new_prompt = add_prompt_to_library(&mut settings, PromptLibrary::PostProcess, name, prompt);
     settings::write_settings(&app, settings);
-
     Ok(new_prompt)
 }
 
@@ -1255,45 +1374,16 @@ pub fn update_post_process_prompt(
     prompt: String,
 ) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
-
-    if let Some(existing_prompt) = settings
-        .post_process_prompts
-        .iter_mut()
-        .find(|p| p.id == id)
-    {
-        existing_prompt.name = name;
-        existing_prompt.prompt = prompt;
-        settings::write_settings(&app, settings);
-        Ok(())
-    } else {
-        Err(format!("Prompt with id '{}' not found", id))
-    }
+    update_prompt_in_library(&mut settings, PromptLibrary::PostProcess, id, name, prompt)?;
+    settings::write_settings(&app, settings);
+    Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn delete_post_process_prompt(app: AppHandle, id: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
-
-    // Don't allow deleting the last prompt
-    if settings.post_process_prompts.len() <= 1 {
-        return Err("Cannot delete the last prompt".to_string());
-    }
-
-    // Find and remove the prompt
-    let original_len = settings.post_process_prompts.len();
-    settings.post_process_prompts.retain(|p| p.id != id);
-
-    if settings.post_process_prompts.len() == original_len {
-        return Err(format!("Prompt with id '{}' not found", id));
-    }
-
-    // If the deleted prompt was selected, select the first one or None
-    if settings.post_process_selected_prompt_id.as_ref() == Some(&id) {
-        settings.post_process_selected_prompt_id =
-            settings.post_process_prompts.first().map(|p| p.id.clone());
-    }
-
+    delete_prompt_from_library(&mut settings, PromptLibrary::PostProcess, &id)?;
     settings::write_settings(&app, settings);
     Ok(())
 }
@@ -1347,13 +1437,68 @@ pub async fn fetch_post_process_models(
 #[specta::specta]
 pub fn set_post_process_selected_prompt(app: AppHandle, id: String) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
+    select_prompt_in_library(&mut settings, PromptLibrary::PostProcess, id)?;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
 
-    // Verify the prompt exists
-    if !settings.post_process_prompts.iter().any(|p| p.id == id) {
-        return Err(format!("Prompt with id '{}' not found", id));
-    }
+#[tauri::command]
+#[specta::specta]
+pub fn add_context_scribe_prompt(
+    app: AppHandle,
+    name: String,
+    prompt: String,
+) -> Result<LLMPrompt, String> {
+    let mut settings = settings::get_settings(&app);
+    let new_prompt =
+        add_prompt_to_library(&mut settings, PromptLibrary::ContextScribe, name, prompt);
+    settings::write_settings(&app, settings);
+    Ok(new_prompt)
+}
 
-    settings.post_process_selected_prompt_id = Some(id);
+#[tauri::command]
+#[specta::specta]
+pub fn update_context_scribe_prompt(
+    app: AppHandle,
+    id: String,
+    name: String,
+    prompt: String,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    update_prompt_in_library(
+        &mut settings,
+        PromptLibrary::ContextScribe,
+        id,
+        name,
+        prompt,
+    )?;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn delete_context_scribe_prompt(app: AppHandle, id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    delete_prompt_from_library(&mut settings, PromptLibrary::ContextScribe, &id)?;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn set_context_scribe_selected_prompt(app: AppHandle, id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    select_prompt_in_library(&mut settings, PromptLibrary::ContextScribe, id)?;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_context_scribe_max_selection_chars(app: AppHandle, limit: u32) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.context_scribe_max_selection_chars = limit;
     settings::write_settings(&app, settings);
     Ok(())
 }

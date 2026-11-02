@@ -13,7 +13,16 @@ import i18n, { syncLanguageFromSettings } from "@/i18n";
 import type { ModelStateEvent } from "@/lib/types/events";
 import { getLanguageDirection } from "@/lib/utils/rtl";
 
-type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
+type OverlayState =
+  | "recording"
+  | "streaming"
+  | "transcribing"
+  | "processing"
+  | "notice"
+  | "diff";
+
+type DiffSpan = { kind: "same" | "insert" | "delete"; text: string };
+type DiffLine = { spans: DiffSpan[] };
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
@@ -61,6 +70,8 @@ const RecordingOverlay: React.FC = () => {
   // True once live text overflows the cap. A top overlay fades its top edge only
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [diffLines, setDiffLines] = useState<DiffLine[]>([]);
 
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
   // Live-text scroll-back: the text region "sticks" to the newest line while the
@@ -82,6 +93,9 @@ const RecordingOverlay: React.FC = () => {
           smoothedLevelsRef.current = Array(16).fill(0);
           setLevels(Array(WAVE_BARS).fill(0));
           setStreamText({ committed: "", tentative: "" });
+        }
+        if (overlayState !== "diff") {
+          setDiffLines([]);
         }
 
         await syncLanguageFromSettings();
@@ -107,6 +121,27 @@ const RecordingOverlay: React.FC = () => {
         }
         setIsVisible(true);
       });
+
+      const unlistenDiff = await listen<{ lines: DiffLine[] }>(
+        "post-result-diff",
+        (event) => {
+          setDiffLines(event.payload.lines ?? []);
+        },
+      );
+
+      const unlistenTooLong = await listen<{ length: number; limit: number }>(
+        "context-scribe-selection-too-long",
+        (event) => {
+          setNotice(
+            i18n.t("overlay.selectionTooLong", {
+              length: event.payload.length,
+              limit: event.payload.limit,
+            }),
+          );
+          setState("notice");
+          setIsVisible(true);
+        },
+      );
 
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
@@ -169,6 +204,8 @@ const RecordingOverlay: React.FC = () => {
 
       return () => {
         unlistenShow();
+        unlistenDiff();
+        unlistenTooLong();
         unlistenHide();
         unlistenReady();
         unlistenLevel();
@@ -340,6 +377,51 @@ const RecordingOverlay: React.FC = () => {
                 true,
               )
             : listeningRow(open, true)}
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "diff") {
+    if (diffLines.length === 0) return null;
+    return (
+      <div
+        dir={direction}
+        className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      >
+        <div className="scard diff">
+          <div className="stext">
+            <div className="stext-clip">
+              <div className="stext-cap diff-cap">
+                {diffLines.map((line, index) => (
+                  <p key={index} className="diff-line">
+                    {line.spans.map((span, spanIndex) => (
+                      <span key={spanIndex} className={`diff-${span.kind}`}>
+                        {span.text}
+                      </span>
+                    ))}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "notice") {
+    return (
+      <div
+        dir={direction}
+        className={`ov-stage ${position} ov-fade ${isVisible ? "show" : ""}`}
+      >
+        <div className="scard compact">
+          <div className="sbase">
+            <span className="swork-label">
+              {notice || t("overlay.selectionTooLongShort")}
+            </span>
+          </div>
         </div>
       </div>
     );

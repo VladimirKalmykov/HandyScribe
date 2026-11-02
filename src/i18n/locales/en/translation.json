@@ -345,6 +345,10 @@
           "transcribe_with_post_process": {
             "name": "Post-Processing Hotkey",
             "description": "Optional: A dedicated hotkey that always applies AI post-processing to your transcription."
+          },
+          "transcribe_with_context_scribe": {
+            "name": "Context Scribe Hotkey",
+            "description": "Records speech, reads the text selected in the focused app, and sends both through the Context Scribe prompt. The selection is sent to your external provider. The reply replaces the selection. Windows and macOS only; Linux does not read a selection."
           }
         },
         "errors": {
@@ -684,6 +688,22 @@
         "createFirst": "Click 'Create New Prompt' above to create your first post-processing prompt."
       }
     },
+    "contextScribe": {
+      "title": "Context Scribe",
+      "maxSelection": {
+        "title": "Maximum selection length",
+        "description": "Characters of selected text Context Scribe may send. A longer selection is refused and is not shortened. Your dictation is not pasted over it.",
+        "characters": "characters"
+      },
+      "prompts": {
+        "selectedPrompt": {
+          "title": "Context Scribe Prompt",
+          "description": "Used only by the Context Scribe hotkey, separate from post-processing. Use ${output} for the spoken instruction and ${selection} for the selected text. ${selection} is sent to your external provider."
+        },
+        "promptTip": "Tip: Use <output>${output}</output> for the spoken instruction and <selection>${selection}</selection> for the selected text. The selection is sent to your external provider.",
+        "createFirst": "Click 'Create New Prompt' above to create your first Context Scribe prompt."
+      }
+    },
     "history": {
       "title": "History",
       "openFolder": "Open Recordings Folder",
@@ -804,6 +824,10 @@
       "postProcessingToggle": {
         "label": "Post Processing",
         "description": "Enable AI-powered text refinement after transcription"
+      },
+      "contextScribeToggle": {
+        "label": "Context Scribe",
+        "description": "Register a separate hotkey that reads the selected text and sends it to the external provider with your dictation. The model reply replaces that selection. Windows and macOS only."
       },
       "muteWhileRecording": {
         "label": "Mute While Recording",
@@ -940,7 +964,9 @@
     "modelLoadFailedUnknown": "unknown model",
     "pasteFailedTitle": "Failed to Paste Text",
     "pasteFailed": "Text could not be pasted into the active application.",
-    "transcriptionFailedTitle": "Transcription Failed"
+    "transcriptionFailedTitle": "Transcription Failed",
+    "selectionTooLongTitle": "Selection is too long",
+    "selectionTooLong": "The selected text is {{length}} characters, over the limit of {{limit}}. It was not sent to the provider, and the dictation was not pasted over it."
   },
   "appLanguage": {
     "title": "Application Language",
@@ -958,7 +984,9 @@
   "overlay": {
     "transcribing": "Transcribing...",
     "processing": "Processing...",
-    "loadingModel": "Loading model..."
+    "loadingModel": "Loading model...",
+    "selectionTooLong": "Selection is too long ({{length}}/{{limit}})",
+    "selectionTooLongShort": "Selection is too long"
   },
   "secureInput": {
     "blockedWithCulprit_one": "{{name}} may be blocking 1 shortcut",
